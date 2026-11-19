@@ -1,15 +1,34 @@
-Current SSL Certificates expires on: April 8, 2026
-
 Important notes
-Every 90 days, the SSL Certificates need to be regenerated, by following https://docs.hubsfoundation.org/regenerating-ssl-certificates.html
-Initial admin, domain name and security credentials are first entered in input-values.yaml, after which "gen-hcce" script is used to generate hcce.yaml. Edit hcce.yaml directly for the purpose of regenerating ssl certificates.
-NEVER change the security credentials of Guardian_key, Phx_key (phoenix), and Node_cookie. Even after changing these back to the correct values, experience shows that the cluster can remain bugged, and will require redeployment.
+
+Certificates renew automatically. cert-manager owns all four of them, so there is no
+90-day renewal to do. **Do not run `npm run gen-ssl`**. That command and cert-manager would fight
+over the same Secrets.
+
+Initial admin, domain name and credentials go in `input-values.yaml`, then `gen-hcce`
+generates `hcce.yaml` from it.
 
 ![Hubs Cloud Community Edition](https://uploads-prod.reticulum.io/files/05884d13-e5e8-4f64-9aca-792aae6d7734.png)
 
 # Hubs Community Edition - Setup and Maintenance Guide
 
-This guide covers deploying Mozilla Hubs Community Edition on DigitalOcean Kubernetes, with DNS via Porkbun and transactional email via Scaleway.
+This guide covers deploying Hubs Community Edition on DigitalOcean Kubernetes, with DNS via Porkbun and transactional email via Scaleway.
+
+---
+
+## Contents
+
+**Already running it? The two sections you want are
+[Upgrading the application](#upgrading-the-application) and
+[Updating the Cluster Configuration](#updating-the-cluster-configuration).**
+
+| Setting it up | Running it |
+|---|---|
+| [Prerequisites](#prerequisites) | [**Upgrading the application**](#upgrading-the-application) |
+| [1. Domain](#1-register-a-domain-porkbun) · [2. Email](#2-set-up-transactional-email-scaleway) | [**Updating the Cluster Configuration**](#updating-the-cluster-configuration) |
+| [3. Cluster](#3-create-a-kubernetes-cluster-digitalocean) · [4. Tools](#4-install-command-line-tools) | [Certificates](#certificates) |
+| [5. doctl](#5-connect-doctl-to-digitalocean) · [6. Configure](#6-configure-hubs) | [Syncing with Upstream](#syncing-with-upstream) |
+| [7. Deploy](#7-deploy-to-kubernetes) · [8. DNS](#8-link-domain-to-cluster-porkbun-dns) | [Troubleshooting](#troubleshooting) |
+| [9. Certificates](#9-certificates) · [10. Firewalls](#10-set-up-firewalls-digitalocean) · [11. Login](#11-first-login) | |
 
 ---
 
@@ -20,6 +39,7 @@ This guide covers deploying Mozilla Hubs Community Edition on DigitalOcean Kuber
 - A DigitalOcean account
 - A registered domain name (see step 1)
 - Windows, macOS, or Linux machine with command line access
+- Node.js and git installed (step 6 needs `npm`)
 
 ---
 
@@ -184,20 +204,40 @@ doctl auth switch --context HubsContext
 
 ## 6. Configure Hubs
 
-1. Clone or download the [hubs-cloud repository](https://github.com/Hubs-Foundation/hubs-cloud) and open the `community-edition` folder.
-2. Open `input-values.yaml` and fill in the following fields:
+1. Clone **this** repository — `4D-Research-Lab/hubs-cloud` — and open the
+   `community-edition` folder. Not `Hubs-Foundation/hubs-cloud`: this fork carries the
+   automatic certificate renewal, the credential handling and several fixes upstream does
+   not have.
+2. Copy the template and fill it in:
+
+```bash
+cp input-values.yaml.example input-values.yaml
+```
 
 | Field | Value |
 |---|---|
 | `HUB_DOMAIN` | Your Porkbun domain, e.g. `yourcoolhubs.space` |
 | `ADM_EMAIL` | Your admin email address |
+| **`PERSISTENT_VOLUME_STORAGE_CLASS`** | **`do-block-storage-retain`** — see the warning below |
 | `SMTP_SERVER` | `smtp.tem.scaleway.com` |
 | `SMTP_PORT` | `2587` |
 | `SMTP_USER` | Your Scaleway Project ID |
 | `SMTP_PASS` | Your Scaleway API secret key |
-| `node`, `guardian`, `phoenix` | Random strings of lowercase letters and numbers |
+| `NODE_COOKIE`, `GUARDIAN_KEY`, `PHX_KEY` | Random strings — `openssl rand -base64 32` |
+| `DB_PASS` | A password you choose. **Do not leave the placeholder.** |
 
-> Do not change `node`, `guardian`, or `phoenix` after the initial setup.
+> ### ⚠️ `PERSISTENT_VOLUME_STORAGE_CLASS` is the field that destroys data if you get it wrong
+>
+> If it is absent, the generator defaults it to `manual`, which stores the database and
+> every uploaded file in **plain directories on the node's own disk**. A managed
+> Kubernetes provider replaces that node from time to time — routine upgrades do it — and
+> the replacement arrives with those directories empty. Every pod reports healthy and
+> nothing errors anywhere, but the data is gone.
+>
+> **That happened to this instance on 21 September 2026 and everything was lost.** Set it
+> to a real storage class. `kubectl get storageclass` lists what your cluster offers; on
+> DigitalOcean, `do-block-storage-retain` also keeps the disk if the claim is ever
+> deleted.
 
 Optionally, add API tokens for SketchFab and Tenor in their respective fields.
 
@@ -208,7 +248,14 @@ npm ci
 npm run gen-hcce
 ```
 
-This generates a `hcce.yaml` file based on your input values.
+This generates **two** files from your input values:
+
+- `hcce.yaml` — everything except credentials. Safe to re-apply any time.
+- `hcce-secret.yaml` — the passwords and keys.
+
+They are separate because `gen-hcce` mints a fresh encryption keypair on every run. If
+they were one file, re-applying it would replace the live credentials with new ones. Both
+are gitignored; never commit either.
 
 ---
 
@@ -217,14 +264,20 @@ This generates a `hcce.yaml` file based on your input values.
 Navigate to the `community-edition` folder in your terminal:
 
 ```bash
-cd C:/hubs-cloud-master/community-edition/
+cd /path/to/hubs-cloud/community-edition
 ```
 
 Apply the configuration to the cluster:
 
 ```bash
-kubectl apply -f hcce.yaml
+npm run apply
 ```
+
+**Use `npm run apply`, not `kubectl apply -f hcce.yaml` directly.** They are not the same.
+`npm run apply` first shows you `kubectl diff` and refuses to proceed until you pass
+`--yes`, and it creates the credentials Secret on a first install. A raw `kubectl apply`
+does neither — on 18 November 2026 it broke TLS on the live site by applying a template
+setting the cluster had never had.
 
 Verify the deployment:
 
@@ -258,25 +311,27 @@ These four records allow the domain and its required subdomains to reach the Hub
 
 ---
 
-## 9. Set Up SSL Certificates
+## 9. Certificates
 
-Run the following command from the `community-edition` folder:
+**There is nothing to do here.** cert-manager issues and renews all four certificates
+automatically, and the `ret` ingress is already annotated to make that happen.
 
-```bash
-npm run gen-ssl
-```
+**Do not run `npm run gen-ssl`.** It and cert-manager would fight over the same Secrets.
 
-Verify that the output contains four certificates: `cert-`, `cert-assets`, `cert-stream`, and `cert-cors`. If any are missing, run the command again.
-
-Then, open `hcce.yaml` and find the line containing `default-ssl-certificate` (around line 1315, or use Ctrl+F to search). Add a `#` at the start of that line to comment it out.
-
-Re-apply the configuration:
+Within a couple of minutes of step 8 (DNS), all four should report `True`:
 
 ```bash
-kubectl apply -f hcce.yaml
+kubectl get certificate -n hcce
 ```
 
-Your Hubs instance is now accessible via your domain. If the security warning persists in your browser, clear the browser cache or try a different browser.
+If one stays `False`, the cause is usually DNS -- the ACME challenge needs your domain
+resolving to the load balancer. Check the A records from step 8, then see
+[A certificate is not being issued](#a-certificate-is-not-being-issued).
+
+> **Setting up a brand-new cluster?** cert-manager has to be installed first; it is not
+> part of `hcce.yaml`. The operations notes (`reference/certificates.md`) have the
+> one-time install, including a staging-first step so a mistake does not burn Let's
+> Encrypt's rate limits.
 
 ---
 
@@ -308,27 +363,93 @@ Hubs is now fully operational.
 
 ## Maintenance
 
-### Refreshing SSL Certificates
+### Certificates
 
-SSL certificates generated by `npm run gen-ssl` are valid for 90 days. To renew:
+**Nothing to do. They renew themselves.** cert-manager renews roughly 30 days before
+expiry, retries on failure, and keeps its ACME account key, so nothing is reissued from
+scratch. The 90-day `npm run gen-ssl` routine this section used to describe is gone, and
+**running `gen-ssl` now would fight cert-manager over the same Secrets.**
 
 ```bash
-cd C:/hubs-cloud-master/community-edition/
-npm run gen-ssl
-kubectl apply -f hcce.yaml
+kubectl get certificate -n hcce
 ```
 
-Verify again that all four certificates appear in the output before applying.
+All four should say `True`. To check what browsers actually receive:
+
+```bash
+echo | openssl s_client -connect virtualplaces-uva.eu:443 -servername virtualplaces-uva.eu 2>/dev/null | openssl x509 -noout -issuer -dates
+```
+
+The issuer should say **Let's Encrypt**. If it names the site itself, the self-signed
+fallback is being served -- see
+[Browser shows a security warning](#browser-shows-a-security-warning).
 
 ### Syncing with Upstream
 
-This repository tracks updates from [Hubs-Foundation/hubs-cloud](https://github.com/Hubs-Foundation/hubs-cloud). A GitHub Actions workflow runs every Monday to merge upstream changes.
+> **Corrected 18 November 2026.** This section used to say a GitHub Actions workflow ran
+> every Monday to merge upstream changes, and to trigger it from **Actions > Sync
+> Upstream**. **No such workflow exists, and none ever has** -- the repository has two
+> workflows and neither is it. Nothing was watching upstream, which is a large part of why
+> this fork sat 19 commits behind while the server ran a two-year-old build. **Do not rely
+> on an automatic sync; there isn't one.**
 
-To trigger a sync manually, go to **Actions > Sync Upstream** in this repository and click **Run workflow**.
+Syncing is manual. From the repository root:
 
-If the workflow fails, there are merge conflicts on files that were modified locally. Resolve them before merging.
+```bash
+git fetch upstream && git log --oneline master..upstream/master
+```
 
-> `input-values.yaml` contains your configuration and should never be overwritten by upstream changes. If a merge conflict appears on this file, always keep your local version.
+Nothing printed means you are up to date. Commits printed are worth reading before
+merging, and occasionally urgent: upstream's `3f74c73` fixed a Kubernetes 1.34 memory
+problem that cost this instance a day of debugging two months after it was published.
+
+**That check is the thing most worth automating, and it is not done yet.** Note that a
+"how far is upstream ahead" check would **not** have caught the bug that pinned this
+instance to a dead image for fifteen months -- that was a local commit reverting an
+upstream fix, which is invisible to `master..upstream/master`. Catching that needs a diff
+of `input-values.yaml.example` against upstream's `input-values.yaml`.
+
+Expect conflicts in `generate_script/hcce.yam`, `readme.md` and `input-values.yaml`. Every
+fork-local change in the templates has a comment above it saying what it is for and what
+breaks without it, so the file itself tells you whether to keep ours.
+
+> **`input-values.yaml` is not tracked by git** -- it holds live credentials, and a
+> filled-in copy was once committed to this public repository by accident. So a merge from
+> upstream reports it as *"deleted by us, modified by them"* rather than a normal
+> conflict. **The answer is always: keep it deleted.** If upstream added a genuinely new
+> setting, copy that one line into `input-values.yaml.example` and into your own
+> `input-values.yaml`.
+
+### Upgrading the application
+
+The six Hubs Foundation images are pinned to exact builds in `input-values.yaml`, so
+nothing moves unless someone decides it should. To move one:
+
+1. Find the current build number on Docker Hub — e.g.
+   https://hub.docker.com/r/hubsfoundation/reticulum/tags — and look for the newest
+   `stable-NNN`.
+2. Change that one line in `input-values.yaml`, so the file records what is running.
+3. Apply it to the cluster, one service at a time:
+
+```bash
+kubectl set image deploy/reticulum reticulum=hubsfoundation/reticulum:stable-860 -n hcce
+```
+
+```bash
+kubectl rollout status deploy/reticulum -n hcce --timeout=300s
+```
+
+Check the site between each one. **To undo, run the same command with the old build
+number** — the old image is still cached on the node, so it comes back in seconds.
+
+Services and their images: `reticulum`, `hubs`, `spoke`, `dialog`, `nearspark`,
+`photomnemonic` are all `hubsfoundation/<name>`. `coturn`, `haproxy`, `pgsql`,
+`pgbouncer`, `pgbouncer-t` and `postgrest` are `mozillareality` images with no Hubs
+Foundation replacement — leave them.
+
+**Do not restart `coturn` with `kubectl rollout restart`.** It binds a fixed host port and
+the replacement pod can never take it from the old one, so the rollout hangs forever. Use
+`kubectl scale deploy coturn --replicas=0 -n hcce` then `--replicas=1`.
 
 ### Updating the Cluster Configuration
 
@@ -336,8 +457,23 @@ After any change to `input-values.yaml` or `hcce.yaml`:
 
 ```bash
 npm run gen-hcce
-kubectl apply -f hcce.yaml
+npm run apply
 ```
+
+That is safe to run as often as you like. `hcce.yaml` holds no credentials, so applying it
+cannot disturb them, and `npm run apply` only applies `hcce-secret.yaml` if the cluster has
+no credentials yet — a first install.
+
+**If you changed a password or key** in `input-values.yaml`, that is the one case needing
+an extra step, because the cluster will not pick it up otherwise:
+
+```bash
+kubectl apply -f hcce-secret.yaml
+kubectl rollout restart deploy/reticulum deploy/dialog -n hcce
+```
+
+Restart **both**. They share a key, and if only one restarts they disagree about it and
+voice stops working — with nothing in the logs to say why.
 
 ---
 
@@ -373,18 +509,48 @@ kubectl -n hcce get svc lb
 
 - DNS changes can take a few minutes to propagate. Porkbun's minimum TTL is 600 seconds.
 
-### Browser shows a security warning after SSL setup
+### Browser shows a security warning
 
-- Clear your browser cache
-- Try the URL in a private/incognito window or a different browser
-- Confirm that the line containing `default-ssl-certificate` in `hcce.yaml` is commented out with `#`
-- Confirm all four certificates were generated before running `kubectl apply`
+Find out which certificate is actually being served:
 
-### SSL certificate renewal fails (missing certificates)
+```bash
+echo | openssl s_client -connect virtualplaces-uva.eu:443 -servername virtualplaces-uva.eu 2>/dev/null | openssl x509 -noout -subject -issuer
+```
 
-Run `npm run gen-ssl` again. If one or more certificates still do not appear, check that:
-- Your Porkbun A records are still pointing to the correct External-IP
-- The cluster is fully online (`kubectl get deployment -n hcce`)
+- **`issuer` says Let's Encrypt** -- the certificate is fine. Clear the browser cache or
+  try a private window.
+- **`issuer` matches `subject`** (both your domain) -- the **self-signed** `cert-hcce` is
+  being served instead of the real ones, which means haproxy has been given
+  `--default-ssl-certificate`. That flag is deliberately **not** in this fork's template;
+  if it is back, a merge from upstream reintroduced it. Remove it and re-apply, or
+  `kubectl rollout undo deploy/haproxy -n hcce`.
+- **a certificate shows `False`** in `kubectl get certificate -n hcce` -- it has not been
+  issued; see [A certificate is not being issued](#a-certificate-is-not-being-issued).
+
+This exact failure happened on 18 November 2026, and the site answered HTTP 200 throughout
+-- nothing looked wrong from inside the cluster. **Check from outside.**
+
+### A certificate is not being issued
+
+**Do not run `npm run gen-ssl`** -- cert-manager owns these and the two would fight.
+
+```bash
+kubectl get certificate -n hcce
+kubectl describe certificaterequest -n hcce | tail -40
+```
+
+Usual causes:
+
+- The Porkbun A records no longer point at the load balancer's External-IP, so the ACME
+  challenge cannot reach the cluster
+- The cluster is not fully online (`kubectl get pods -n hcce`)
+- The `cert-manager.io/cluster-issuer` annotation has gone from the `ret` ingress. A
+  regeneration from an older template does this, and it fails **silently** -- no error,
+  renewals just stop. Check it is there:
+
+```bash
+kubectl get ingress ret -n hcce -o jsonpath='{.metadata.annotations}'
+```
 
 ### Magic link emails are not arriving
 
@@ -445,6 +611,13 @@ Verify connectivity:
 kubectl get nodes
 ```
 
+
+<!-- ------------------------------------------------------------------------
+     4D-SPECIFIC CONTENT ENDS HERE. Everything BELOW is upstream's readme.
+
+     If a merge from upstream conflicts in this file: keep everything above
+     this marker, take upstream's version of everything below it.
+     ------------------------------------------------------------------------ -->
 
 # Hubs Cloud Community Edition
 

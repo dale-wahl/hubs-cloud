@@ -1,0 +1,50 @@
+# Let's Encrypt issuers for virtualplaces-uva.eu
+#
+# Two issuers: staging first (untrusted certs, but generous rate limits, so we
+# prove the plumbing works), then prod once staging succeeds.
+#
+# The HTTP-01 solver uses `class: haproxy` rather than `ingressClassName`
+# because this cluster's ingresses use the legacy
+# `kubernetes.io/ingress.class: haproxy` annotation and there is no
+# IngressClass object.
+---
+apiVersion: cert-manager.io/v1
+kind: ClusterIssuer
+metadata:
+  name: letsencrypt-staging
+spec:
+  acme:
+    server: https://acme-staging-v02.api.letsencrypt.org/directory
+    email: t.j.r.lanjouw@uva.nl     # ADM_EMAIL from input-values.yaml
+    privateKeySecretRef:
+      name: letsencrypt-staging-account-key
+    solvers:
+      - http01:
+          ingress:
+            class: haproxy
+            # HAProxy redirects HTTP->HTTPS for any host with TLS configured,
+            # which breaks cert-manager's plain-HTTP self check whenever there
+            # is no working certificate on 443 yet. Exempt the solver ingress.
+            ingressTemplate:
+              metadata:
+                annotations:
+                  haproxy.org/ssl-redirect: "false"
+---
+apiVersion: cert-manager.io/v1
+kind: ClusterIssuer
+metadata:
+  name: letsencrypt-prod
+spec:
+  acme:
+    server: https://acme-v02.api.letsencrypt.org/directory
+    email: t.j.r.lanjouw@uva.nl     # ADM_EMAIL from input-values.yaml
+    privateKeySecretRef:
+      name: letsencrypt-prod-account-key
+    solvers:
+      - http01:
+          ingress:
+            class: haproxy
+            ingressTemplate:
+              metadata:
+                annotations:
+                  haproxy.org/ssl-redirect: "false"

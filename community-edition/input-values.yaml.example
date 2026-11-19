@@ -1,0 +1,92 @@
+# Template for input-values.yaml
+#
+#   cp input-values.yaml.example input-values.yaml
+#
+# Then fill in your own values. input-values.yaml is gitignored because it
+# holds live credentials - never commit it.
+#
+# Generate NODE_COOKIE, GUARDIAN_KEY and PHX_KEY as long random strings, e.g.
+#   openssl rand -base64 32
+
+HUB_DOMAIN: "example.net"
+ADM_EMAIL: "admin@example.net"
+Namespace: "hcce"
+Container_Dockerhub_Username: "mozillareality"
+
+# Pin this to a specific version rather than a floating tag. With
+# "stable-latest" any pod recreation can pull a newer build, which turns a
+# routine restart into an unplanned upgrade with database migrations attached.
+Container_Tag: "stable-latest"
+
+DB_USER: "postgres"
+DB_PASS: "changeMe"
+DB_NAME: "retdb"
+DB_HOST: "pgbouncer"
+DB_HOST_T: "pgbouncer-t"
+PGRST_DB_URI: "postgres://$DB_USER:$DB_PASS@pgbouncer/$DB_NAME"
+PSQL: "postgres://$DB_USER:$DB_PASS@pgbouncer/$DB_NAME"
+
+SMTP_SERVER: "changeMe"
+SMTP_PORT: "changeMe"
+SMTP_USER: "changeMe"
+SMTP_PASS: "changeMe"
+
+NODE_COOKIE: "changeMe"
+GUARDIAN_KEY: "changeMe"
+PHX_KEY: "changeMe"
+
+SKETCHFAB_API_KEY: "?"
+TENOR_API_KEY: "?"
+
+GENERATE_PERSISTENT_VOLUMES: "Yes"
+PERSISTENT_VOLUME_SIZE: "10Gi"
+
+# IMPORTANT - set this to a real storage class from your cluster.
+#
+# If this key is absent, generate_script/index.js defaults it to "manual":
+#
+#     processedConfig.PERSISTENT_VOLUME_STORAGE_CLASS ||= 'manual';
+#
+# "manual" emits generate_script/persistent_volumes.yam, which creates
+# hostPath volumes - plain directories (/mnt/pgsql_data, /mnt/ret_storage_data)
+# on the node's own disk. On a managed Kubernetes service the provider replaces
+# that node during routine upgrades, and everything stored there is destroyed.
+# The PersistentVolumes then re-bind to the empty directories and every pod
+# reports healthy, so the loss is silent.
+#
+# That is only safe for a throwaway single-node test. For anything with data
+# in it, use a storage class backed by real network-attached disks. List what
+# your cluster offers with:
+#
+#     kubectl get storageclass
+#
+# On DigitalOcean, "do-block-storage-retain" also keeps the underlying disk if
+# the claim is ever deleted.
+PERSISTENT_VOLUME_STORAGE_CLASS: "do-block-storage-retain"
+
+# 4D: these six are pinned to exact builds rather than ":$Container_Tag", on purpose.
+#
+# A floating tag like "stable-latest" sounds like it keeps you current. It does not:
+# imagePullPolicy is IfNotPresent, so a restart reuses the cached image and nothing
+# moves -- but a NEW node has no cache, so a node replacement pulls whatever the label
+# points at that day, unattended. That is how this instance ran a September 2024 server
+# under a March 2026 browser client for fifteen months.
+#
+# Pinned, the running version is written down here, and upgrading is deliberate:
+# look up the current build on Docker Hub, change the number below, then
+#   kubectl set image deploy/<service> <service>=hubsfoundation/<service>:<build> -n hcce
+# one service at a time. Reverse it by running the same command with the old number.
+#
+# Container_Tag above still applies to the five mozillareality images, whose tags have
+# not moved in years.
+OVERRIDE_RETICULUM_IMAGE: "hubsfoundation/reticulum:stable-855"
+OVERRIDE_POSTGREST_IMAGE: "No"
+OVERRIDE_POSTGRES_IMAGE: "No"
+OVERRIDE_PGBOUNCER_IMAGE: "No"
+OVERRIDE_HUBS_IMAGE: "hubsfoundation/hubs:stable-3121"
+OVERRIDE_SPOKE_IMAGE: "hubsfoundation/spoke:stable-107"
+OVERRIDE_NEARSPARK_IMAGE: "hubsfoundation/nearspark:stable-40"
+OVERRIDE_PHOTOMNEMONIC_IMAGE: "hubsfoundation/photomnemonic:stable-91"
+OVERRIDE_DIALOG_IMAGE: "hubsfoundation/dialog:stable-339"
+OVERRIDE_COTURN_IMAGE: "No"
+OVERRIDE_HAPROXY_IMAGE: "No"

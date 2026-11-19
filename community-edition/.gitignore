@@ -1,5 +1,7 @@
 /node_modules
 /hcce.yaml
+/hcce-secret.yaml
 /ssl_script/cbb.yaml
 /data_backups
 .DS_Store
+/input-values.yaml*

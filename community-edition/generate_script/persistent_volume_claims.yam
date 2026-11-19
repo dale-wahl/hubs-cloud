@@ -8,7 +8,12 @@ metadata:
   namespace: $Namespace
 spec:
   accessModes:
-    - ReadWriteOncePod
+    # 4D: not upstream, which says ReadWriteOncePod. accessModes is IMMUTABLE on an
+    # existing PersistentVolumeClaim, so with upstream's value a regeneration fails
+    # outright against any cluster already running -- with an error that gives no hint
+    # why. Upstream's own generator forces ReadWriteOnce when the storage class is
+    # "manual", so the two only disagree on a real storage class like ours. Keep this.
+    - ReadWriteOnce
   resources:
     requests:
       storage: $PERSISTENT_VOLUME_SIZE

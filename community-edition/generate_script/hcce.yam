@@ -46,6 +46,12 @@ metadata:
   namespace: $Namespace
   annotations:
     kubernetes.io/ingress.class: haproxy
+    # 4D: not upstream. cert-manager watches this annotation and renews all four
+    # TLS certificates automatically, replacing the manual 90-day `npm run gen-ssl`.
+    # Removing it stops renewal SILENTLY (no error, the certificates just expire).
+    # Only this ingress is annotated: it lists all four hostnames, and annotating
+    # the others would create competing Certificates for the same Secrets.
+    cert-manager.io/cluster-issuer: letsencrypt-prod
     haproxy.org/response-set-header: |
       access-control-allow-origin "https://$HUB_DOMAIN"
     haproxy.org/path-rewrite: /api-internal(.*) /_drop_
@@ -328,10 +334,12 @@ data:
     from = "noreply@<HUB_DOMAIN>"
 
     [ret."Elixir.Ret.Mailer"]
-    server = "<SMTP_SERVER>"
+    relay = "<SMTP_SERVER>"
     port = "<SMTP_PORT>"
     username = "<SMTP_USER>"
     password = "<SMTP_PASS>"
+
+    server = "<SMTP_SERVER>" # deprecated - kept for old Reticulum/Bamboo compatibility.
 
     [ret."Elixir.Ret.Support"]
     slack_webhook_url = "<SLACK_WEBHOOK>"
@@ -416,8 +424,12 @@ spec:
   strategy:
     type: RollingUpdate
     rollingUpdate:
-      maxUnavailable: 0
-      maxSurge: 1
+      # 4D: not upstream, which has maxSurge 1 / maxUnavailable 0. Reversed here
+      # because this is a SINGLE-NODE cluster: surging starts a second Reticulum
+      # before stopping the first, and in November 2026 that evicted 58 pods.
+      # Stop the old pod first instead.
+      maxUnavailable: 1
+      maxSurge: 0
   revisionHistoryLimit: 1
   template:
     metadata:
@@ -559,6 +571,8 @@ spec:
           value: "http://speelycaptor:5000"
         - name: turkeyCfg_STORAGE_QUOTA_GB
           value: "1000"
+        - name: ERL_MAX_PORTS
+          value: "1048576"
         livenessProbe:
           httpGet:
             path: /health
@@ -1238,6 +1252,7 @@ spec:
       containers:
       - name: haproxy
         image: $Container_Dockerhub_Username/haproxy:$Container_Tag
+        command: ["sh", "-c", 'ulimit -n 1048576 && /start.sh "$@"', "--"]
         args:
         - --configmap=$Namespace/haproxy-config
         - --https-bind-port=4443
@@ -1245,7 +1260,16 @@ spec:
         - --configmap-tcp-services=$Namespace/haproxy-tcp-config
         - --ingress.class=haproxy
         - --log=warning #error warning info debug trace
-        - --default-ssl-certificate=$Namespace/cert-hcce
+        # 4D: upstream has  - --default-ssl-certificate=$Namespace/cert-hcce  here.
+        # REMOVED, and do not put it back. Applied to this cluster on 18 November 2026 it
+        # made the SELF-SIGNED cert-hcce certificate the one served to every visitor,
+        # instead of the four Let's Encrypt certificates cert-manager maintains. The site
+        # still answered HTTP 200, so nothing looked broken from inside the cluster -- but
+        # every browser showed a security warning. Verified with:
+        #   echo | openssl s_client -connect virtualplaces-uva.eu:443         #     -servername virtualplaces-uva.eu | openssl x509 -noout -issuer
+        # which returned issuer=CN=virtualplaces-uva.eu, i.e. self-signed. Reverted with
+        # kubectl rollout undo. cert-manager owns TLS here, so there is no role for a
+        # default certificate.
         securityContext:
           runAsUser:  1000
           runAsGroup: 1000
@@ -1254,10 +1278,27 @@ spec:
               - ALL
             add:
               - NET_BIND_SERVICE
+        # 4D: not upstream, which sets no resources on any container. The live
+        # cluster has had this cap since before November 2026 and it was missing
+        # from this template, so regenerating would have removed it. HAProxy sizes
+        # itself from the cgroup limit (its own log: "Memory limit for HAProxy:
+        # 170MiB"), so this cap and the `ulimit -n` above address the same problem
+        # by different routes. Keep both.
+        resources:
+          requests:
+            memory: 128Mi
+          limits:
+            memory: 256Mi
         livenessProbe:
           httpGet:
             path: /healthz
             port: 1042
+          # 4D: not upstream, which leaves the defaults (1s timeout, 3 failures).
+          # Those killed the ingress controller five times during the November 2026
+          # incident, taking the site down each time. More tolerant.
+          timeoutSeconds: 5
+          periodSeconds: 10
+          failureThreshold: 5
         env:
         - name: TZ
           value: "Etc/UTC"
